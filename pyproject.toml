@@ -1,0 +1,13 @@
+[project]
+name = "capg-rag"
+version = "0.1.0"
+description = "Context-Aware Prompt Governance System for RAG-based AI Applications"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100

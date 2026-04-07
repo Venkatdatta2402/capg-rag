@@ -1,0 +1,79 @@
+name: capg-rag
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.12
+  - pip
+
+  # Core scientific stack
+  - numpy
+  - pandas
+  - scipy
+
+  # PyTorch (CPU; swap pytorch-gpu for CUDA)
+  - pytorch::pytorch
+  - pytorch::torchvision
+  - pytorch::cpuonly
+
+  # PostgreSQL driver (native, more reliable via conda)
+  - psycopg2
+
+  - pip:
+    # ── LLM APIs ──────────────────────────────────────────────────────────────
+    - openai                        # GPT-4.1, GPT-4o-mini
+    - google-generativeai           # Gemini Flash, Gemini Pro
+    - anthropic                     # Claude (optional fallback)
+    - tiktoken                      # Token counting for OpenAI models
+
+    # ── Orchestration ─────────────────────────────────────────────────────────
+    - langchain
+    - langchain-community
+    - langchain-openai
+    - langchain-google-genai
+    - langgraph                     # Agent loop coordination & state handoff
+
+    # ── Experiment & Evaluation ───────────────────────────────────────────────
+    - langsmith                     # Experiment framework, comparison dashboards
+
+    # ── Vector DB clients ─────────────────────────────────────────────────────
+    - qdrant-client                 # Primary: BM25 + vector hybrid search
+    - weaviate-client               # Alternative vector DB
+
+    # ── Embeddings & Reranking ────────────────────────────────────────────────
+    - sentence-transformers         # Dense embeddings + cross-encoder reranking
+    - transformers                  # BERT-based cross-encoder models
+    - huggingface-hub               # Model downloads
+
+    # ── Sparse Retrieval ──────────────────────────────────────────────────────
+    - rank-bm25                     # BM25 keyword search
+
+    # ── Session Memory (Redis) ────────────────────────────────────────────────
+    - redis                         # Redis client (TTL-based session state)
+
+    # ── Database / ORM ────────────────────────────────────────────────────────
+    - sqlalchemy                    # ORM for PostgreSQL JSONB
+    - alembic                       # DB migrations
+    - asyncpg                       # Async PostgreSQL driver
+
+    # ── API / Web layer ───────────────────────────────────────────────────────
+    - fastapi
+    - uvicorn[standard]             # ASGI server
+    - httpx                         # Async HTTP client
+
+    # ── PDF Ingestion (NCERT/CBSE knowledge base) ─────────────────────────────
+    - pypdf                         # PDF parsing
+    - pdfplumber                    # Structured PDF table/text extraction
+
+    # ── Utilities ─────────────────────────────────────────────────────────────
+    - python-dotenv                 # Environment variable management
+    - pydantic                      # Data validation & settings
+    - pydantic-settings             # Settings management
+    - tenacity                      # Retry logic for LLM calls
+    - structlog                     # Structured logging
+
+    # ── Testing ───────────────────────────────────────────────────────────────
+    - pytest
+    - pytest-asyncio
+    - pytest-mock
