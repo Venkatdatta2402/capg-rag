@@ -1,8 +1,9 @@
-"""Architecture B: Query Transformation Agent.
+"""Query Transformation Agent.
 
-Focused purely on retrieval optimization through structured rephrasing
-and keyword injection from a curated keyword pool. Separated from the
-Context Object Builder for modularity and parallelization.
+Focused purely on retrieval optimization — rewrites the raw student query
+into a structured, keyword-enriched form that maximises NCERT chunk recall.
+Domain keywords from the keyword store are injected so the model selects
+precise NCERT terms rather than guessing.
 """
 
 import structlog
@@ -47,12 +48,7 @@ REWRITTEN_QUERY: <the optimized query for retrieval>
 
 
 class QueryTransformAgent(BaseAgent):
-    """Query Transformation Agent (Architecture B).
-
-    Separated from context building — this agent focuses purely on
-    making the query optimal for retrieval. Receives domain keywords
-    from the keyword store (looked up by grade+subject before this agent runs).
-    """
+    """Rewrites the raw query into a retrieval-optimized form with NCERT keywords."""
 
     def __init__(self, llm: BaseLLMClient):
         super().__init__(llm)
@@ -63,25 +59,21 @@ class QueryTransformAgent(BaseAgent):
         profile: LearnerProfile,
         domain_keywords: list[str] | None = None,
     ) -> EnrichedQuery:
-        """Transform the raw query into a retrieval-optimized enriched query.
+        """Transform the raw query for retrieval.
 
         Args:
             query_input: Raw user input.
             profile: Learner profile for grade context.
             domain_keywords: Curated keywords from the keyword store for this
-                             grade+subject. Injected into the prompt so the model
-                             selects precise NCERT terms rather than guessing.
-
-        Returns:
-            EnrichedQuery with keywords, chapter/section hints, and rewritten text.
+                             grade+subject. Injected so the model selects precise
+                             NCERT terms rather than guessing.
         """
         keywords_text = (
             ", ".join(domain_keywords) if domain_keywords
             else "No domain keywords available — infer from query content."
         )
 
-        # Try to detect subject from profile or leave for model to detect
-        subject_hint = profile.grade  # model fills in subject from query
+        subject_hint = profile.grade  # model detects subject from query
 
         prompt = QUERY_TRANSFORM_PROMPT.format(
             grade=profile.grade,
@@ -105,9 +97,8 @@ class QueryTransformAgent(BaseAgent):
         return enriched
 
     def _parse_response(self, response: str, query_input: QueryInput) -> EnrichedQuery:
-        lines = response.strip().split("\n")
         parsed = {}
-        for line in lines:
+        for line in response.strip().split("\n"):
             if ":" in line:
                 key, _, value = line.partition(":")
                 parsed[key.strip().upper()] = value.strip()

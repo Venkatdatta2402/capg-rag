@@ -20,19 +20,23 @@ class ResponseMetadata(BaseModel):
 
 
 class QuizQuestion(BaseModel):
-    """A single adversarial quiz question — sent to the client as part of the form."""
+    """A single MCQ quiz question — sent to the client as part of the form.
 
-    question_id: str          # e.g. "q1", "q2", "q3"
+    options: flat strings e.g. ["A) 100 cm", "B) 10 cm", "C) 1000 cm", "D) 1 cm"]
+    Correct answer is NOT included — it is stored server-side in ES via InteractionStore.
+    """
+
+    question_id: str                              # e.g. "q1", "q2", "q3"
     question: str
-    mode: str = "quiz"        # quiz | explanation_prompt
+    options: list[str] = Field(default_factory=list)  # ["A) ...", "B) ...", "C) ...", "D) ..."]
 
 
 class QuizForm(BaseModel):
     """The form embedded in the chat response.
 
-    Contains only questions — expected answers are stored server-side.
-    Submitting this form (all question_id + learner_answer pairs) to
-    POST /quiz/submit triggers the judge model.
+    Contains questions + options only — correct answers are stored server-side.
+    Submitting this form (question_id + selected_option per question) to
+    POST /quiz/submit triggers MCQ grading.
     """
 
     quiz_id: str                                        # keyed by session_id
@@ -45,5 +49,6 @@ class GenerationResponse(BaseModel):
     """Full response from the RAG agent."""
 
     answer_text: str
+    interaction_id: str = ""                            # ES interaction ID for quiz submit
     metadata: ResponseMetadata = Field(default_factory=ResponseMetadata)
     quiz_form: QuizForm = Field(default_factory=QuizForm)

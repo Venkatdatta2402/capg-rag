@@ -1,5 +1,7 @@
 """OpenAI LLM client implementation."""
 
+import json
+
 from openai import AsyncOpenAI
 
 from config.settings import settings
@@ -29,3 +31,29 @@ class OpenAIClient(BaseLLMClient):
             messages=messages,
         )
         return response.choices[0].message.content or ""
+
+    async def generate_with_tools(
+        self,
+        system_prompt: str,
+        user_message: str,
+        tools: list[dict],
+    ) -> tuple[str, list[dict]]:
+        response = await self._client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            tools=tools,
+            tool_choice="auto",
+        )
+        message = response.choices[0].message
+        content = message.content or ""
+        tool_calls = []
+        if message.tool_calls:
+            for tc in message.tool_calls:
+                tool_calls.append({
+                    "name": tc.function.name,
+                    "arguments": json.loads(tc.function.arguments),
+                })
+        return content, tool_calls

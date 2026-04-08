@@ -3,22 +3,22 @@
 from functools import lru_cache
 
 from config.settings import settings
+from src.agents.session_review import SessionReviewAgent
 from src.llm.factory import get_llm_client
-from src.orchestrator.base import BaseOrchestrator
-from src.orchestrator.factory import get_orchestrator
+from src.orchestrator.pipeline import Pipeline
 from src.prompt_service.canary import CanaryRouter
 from src.prompt_service.registry import PromptRegistry
 from src.prompt_service.selector import PromptSelector
 from src.storage.feedback_store import FeedbackStore
-from src.storage.quiz_store import QuizStore
+from src.storage.interaction_store import InteractionStore
 from src.storage.session_memory import SessionMemoryStore
 from src.storage.user_profile import UserProfileStore
 
 
 @lru_cache
-def get_pipeline() -> BaseOrchestrator:
-    """Return the active orchestrator pipeline (cached singleton)."""
-    return get_orchestrator()
+def get_pipeline() -> Pipeline:
+    """Return the active pipeline (cached singleton)."""
+    return Pipeline()
 
 
 @lru_cache
@@ -48,7 +48,16 @@ def get_session_store() -> SessionMemoryStore:
 
 @lru_cache
 def get_prompt_selector() -> PromptSelector:
-    # Uses the context LLM for scoring teaching-style candidates against judge feedback.
-    # The context model is lightweight (e.g. gpt-4o-mini) — appropriate for this task.
     llm = get_llm_client(settings.context_provider, settings.context_model)
     return PromptSelector(PromptRegistry(), CanaryRouter(), llm=llm)
+
+
+@lru_cache
+def get_session_review_agent() -> SessionReviewAgent:
+    llm = get_llm_client(settings.judge_provider, settings.judge_model)
+    return SessionReviewAgent(llm)
+
+
+@lru_cache
+def get_interaction_store() -> InteractionStore:
+    return InteractionStore()

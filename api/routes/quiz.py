@@ -2,28 +2,32 @@
 
 Flow overview:
   1. POST /quiz/submit
-       - Judge evaluates each submitted answer (adversarial CoT)
-       - If FAILED: returns 3 prompt MCQ choices + aggregate retrieval_feedback
-         so the learner (or UI) can pick a teaching style for a second attempt
-       - Deletes quiz from store after evaluation (prevents replay)
+       - Loads quiz questions + correct answers from InteractionStore (ES)
+       - Grades each submitted option deterministically (selected == correct)
+       - If wrong: judge LLM generates retrieval_feedback for that question
+       - Updates the interaction document in ES with student_response + quiz.status
+       - If FAILED: returns 3 prompt MCQ choices + aggregated retrieval_feedback
 
   2. POST /quiz/regenerate  (called after learner picks a prompt MCQ choice)
-       - Re-runs the full pipeline with:
-           * retrieval_hint appended to original query (guides re-retrieval)
-           * chosen prompt version bypassing the selector
+       - Re-runs the full pipeline with retrieval_hint appended to original query
+       - Chosen prompt version bypasses the selector
        - Returns a fresh answer + new quiz_form
 """
+
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.dependencies import get_pipeline, get_prompt_selector, get_quiz_store
-from src.agents.arch_b.judge import SeparateJudgeAgent
+from api.dependencies import get_interaction_store, get_pipeline, get_prompt_selector, get_session_store
+from src.agents.judge import JudgeAgent
+from src.models.interaction import StudentAnswer, StudentResponse
 from src.models.query import QueryInput
 from src.models.response import QuizForm
-from src.orchestrator.arch_b_pipeline import ArchBPipeline
+from src.orchestrator.pipeline import Pipeline
 from src.prompt_service.selector import PromptSelector
-from src.storage.quiz_store import QuizStore
+from src.storage.interaction_store import InteractionStore
+from src.storage.session_memory import SessionMemoryStore
 
 router = APIRouter()
 
@@ -33,54 +37,55 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 class AnswerSubmission(BaseModel):
-    question_id: str    # "q1", "q2", "q3"
-    answer: str
+    question_id: str        # "q1", "q2", "q3"
+    selected_option: str    # "A" | "B" | "C" | "D"
 
 
 class QuizSubmitRequest(BaseModel):
-    quiz_id: str                        # session_id from the quiz_form
+    quiz_id: str            # = session_id
+    interaction_id: str     # from GenerationResponse — identifies the interaction in ES
     user_id: str
-    answers: list[AnswerSubmission]     # one entry per question answered
+    answers: list[AnswerSubmission]
 
 
 class QuestionVerdict(BaseModel):
     question_id: str
     question: str
-    verdict: str                        # UNDERSTOOD | NOT_UNDERSTOOD
+    correct_answer: str
+    selected_option: str
+    verdict: str            # UNDERSTOOD | NOT_UNDERSTOOD
     rationale: str
-    cot_reasoning: str
-    retrieval_feedback: str             # what was missing; empty if UNDERSTOOD
+    retrieval_feedback: str
 
 
 class PromptChoice(BaseModel):
-    """One MCQ option for teaching style selection after a failed quiz."""
     version_id: str
-    variant: str                        # standard | remedial | advanced
-    label: str                          # human-readable label shown in UI
-    template_preview: str               # first 120 chars of the template
+    variant: str
+    label: str
+    template_preview: str
 
 
 class QuizSubmitResponse(BaseModel):
     quiz_id: str
-    overall: str                        # PASSED | FAILED
+    overall: str            # PASSED | FAILED
     passed_count: int
     total_questions: int
     verdicts: list[QuestionVerdict]
-    # populated only when overall == FAILED
     prompt_choices: list[PromptChoice] = []
-    retrieval_hint: str = ""            # aggregated retrieval_feedback for re-retrieval
+    retrieval_hint: str = ""
 
 
 class QuizRegenerateRequest(BaseModel):
     original_query: str
     user_id: str
     session_id: str
-    chosen_prompt_version_id: str       # from PromptChoice.version_id
-    retrieval_hint: str = ""            # from QuizSubmitResponse.retrieval_hint
+    chosen_prompt_version_id: str
+    retrieval_hint: str = ""
 
 
 class QuizRegenerateResponse(BaseModel):
     answer: str
+    interaction_id: str
     prompt_version: str
     architecture: str
     retrieval_quality: str
@@ -100,16 +105,15 @@ _VARIANT_LABELS = {
 
 
 def _build_prompt_choices(versions) -> list[PromptChoice]:
-    choices = []
-    for v in versions:
-        label = _VARIANT_LABELS.get(v.variant, v.variant.capitalize())
-        choices.append(PromptChoice(
+    return [
+        PromptChoice(
             version_id=v.version_id,
             variant=v.variant,
-            label=label,
+            label=_VARIANT_LABELS.get(v.variant, v.variant.capitalize()),
             template_preview=v.template[:120],
-        ))
-    return choices
+        )
+        for v in versions
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -119,77 +123,100 @@ def _build_prompt_choices(versions) -> list[PromptChoice]:
 @router.post("/quiz/submit", response_model=QuizSubmitResponse)
 async def submit_quiz(
     request: QuizSubmitRequest,
-    pipeline: ArchBPipeline = Depends(get_pipeline),
-    quiz_store: QuizStore = Depends(get_quiz_store),
+    pipeline: Pipeline = Depends(get_pipeline),
+    interaction_store: InteractionStore = Depends(get_interaction_store),
     selector: PromptSelector = Depends(get_prompt_selector),
+    session_store: SessionMemoryStore = Depends(get_session_store),
 ):
-    """Evaluate learner answers using the separate judge model (adversarial CoT).
+    """Grade MCQ answers deterministically; call judge LLM only on wrong answers."""
+    session_doc = await interaction_store.get_session(request.quiz_id)
+    if not session_doc:
+        raise HTTPException(status_code=404, detail="Session not found.")
 
-    On FAILED:
-      - Returns 3 prompt MCQ choices (fixed governance — one per teaching style)
-      - Returns aggregated retrieval_feedback to guide re-retrieval in /quiz/regenerate
-    On PASSED:
-      - Returns verdicts only; prompt_choices and retrieval_hint are empty
-    """
-    if not isinstance(pipeline, ArchBPipeline):
-        raise HTTPException(
-            status_code=400,
-            detail="Quiz submission is only supported in Architecture B.",
-        )
+    interaction = next(
+        (ix for ix in session_doc.interactions if ix.interaction_id == request.interaction_id),
+        None,
+    )
+    if not interaction:
+        raise HTTPException(status_code=404, detail="Interaction not found.")
 
-    quiz_data = await quiz_store.load(request.quiz_id)
-    if not quiz_data:
-        raise HTTPException(status_code=404, detail="Quiz not found or already evaluated.")
+    if interaction.quiz.status == "submitted":
+        raise HTTPException(status_code=409, detail="Quiz already submitted.")
 
-    judge: SeparateJudgeAgent = pipeline.judge_agent
-    explanation = quiz_data["explanation"]
-    topic = quiz_data["topic"]
-    grade = quiz_data.get("grade", "")
-    expected_answers: dict[str, str] = quiz_data["answers"]
+    grade = session_doc.grade
+    explanation = interaction.model_answer
+    topic = interaction.meta.topic
+    judge: JudgeAgent = pipeline.judge_agent
 
-    submitted = {a.question_id: a.answer for a in request.answers}
+    # Build lookup: question_id → QuizQuestion (with correct_answer)
+    question_map = {q.question_id: q for q in interaction.quiz.questions}
+    submitted = {a.question_id: a.selected_option for a in request.answers}
 
     verdicts: list[QuestionVerdict] = []
-    for qid, expected in expected_answers.items():
-        learner_answer = submitted.get(qid, "")
+    student_answers: list[StudentAnswer] = []
 
-        jv = await judge.evaluate(
-            question=expected,
-            learner_response=learner_answer,
+    for qid, q in question_map.items():
+        selected = submitted.get(qid, "")
+        student_answers.append(StudentAnswer(question_id=qid, selected_option=selected))
+
+        jv = await judge.grade_mcq(
+            question=q.question,
+            options=q.options,
+            correct_answer=q.correct_answer,
+            selected_option=selected,
             explanation=explanation,
             topic=topic,
         )
 
-        rationale = (
-            jv.cot_reasoning.split("RATIONALE:")[-1].split("\n")[0].strip()
-            if "RATIONALE:" in jv.cot_reasoning else ""
-        )
-
         verdicts.append(QuestionVerdict(
             question_id=qid,
-            question=expected,
+            question=q.question,
+            correct_answer=q.correct_answer,
+            selected_option=selected,
             verdict=jv.verdict,
-            rationale=rationale,
-            cot_reasoning=jv.cot_reasoning,
+            rationale=jv.cot_reasoning,
             retrieval_feedback=jv.retrieval_feedback,
         ))
 
-    # Delete quiz after evaluation — prevent replay attacks
-    await quiz_store.delete(request.quiz_id)
-
     passed = [v for v in verdicts if v.verdict == "UNDERSTOOD"]
     overall = "PASSED" if len(passed) >= 2 else "FAILED"
+    score = len(passed)
+
+    # Update ES interaction with student response
+    student_response = StudentResponse(
+        answers=student_answers,
+        score=score,
+        submitted_at=datetime.utcnow(),
+    )
+    await interaction_store.update_quiz_response(
+        session_id=request.quiz_id,
+        interaction_id=request.interaction_id,
+        student_response=student_response,
+        quiz_status="submitted",
+    )
+
+    # Mirror quiz outcome to runtime session memory for context agents
+    await session_store.update_quiz_result(
+        session_id=request.quiz_id,
+        user_id=request.user_id,
+        interaction_id=request.interaction_id,
+        score=score,
+        quiz_status="submitted",
+    )
 
     prompt_choices: list[PromptChoice] = []
     retrieval_hint = ""
 
     if overall == "FAILED":
-        # Aggregate retrieval feedback from all failed questions into one hint string
         feedbacks = [v.retrieval_feedback for v in verdicts if v.retrieval_feedback]
         retrieval_hint = "; ".join(feedbacks)
 
-        # Feedback-aware selection: LLM scores all 6 seeded teaching styles against
-        # the judge's retrieval feedback and returns the 3 most suitable ones.
+        # Set retry_mode on the persisted ContextObject for next pipeline run
+        await session_store.set_retry_mode(
+            session_id=request.quiz_id,
+            user_id=request.user_id,
+        )
+
         candidate_versions = await selector.select_candidates_from_feedback(
             grade=grade,
             retrieval_feedback=retrieval_hint or "general comprehension failure",
@@ -200,7 +227,7 @@ async def submit_quiz(
     return QuizSubmitResponse(
         quiz_id=request.quiz_id,
         overall=overall,
-        passed_count=len(passed),
+        passed_count=score,
         total_questions=len(verdicts),
         verdicts=verdicts,
         prompt_choices=prompt_choices,
@@ -211,22 +238,9 @@ async def submit_quiz(
 @router.post("/quiz/regenerate", response_model=QuizRegenerateResponse)
 async def regenerate_after_quiz(
     request: QuizRegenerateRequest,
-    pipeline: ArchBPipeline = Depends(get_pipeline),
+    pipeline: Pipeline = Depends(get_pipeline),
 ):
-    """Re-run the pipeline with the learner's chosen prompt and a retrieval hint.
-
-    Called after the learner picks one of the 3 prompt MCQ choices returned
-    by a failed /quiz/submit. The retrieval_hint (aggregated judge feedback)
-    is appended to the original query so the pipeline retrieves more targeted
-    content on this second attempt. The chosen prompt bypasses the selector.
-    """
-    if not isinstance(pipeline, ArchBPipeline):
-        raise HTTPException(
-            status_code=400,
-            detail="Quiz regeneration is only supported in Architecture B.",
-        )
-
-    # Append retrieval hint to query so re-retrieval targets missing concepts
+    """Re-run the pipeline with the learner's chosen prompt and a retrieval hint."""
     enriched_query_text = request.original_query
     if request.retrieval_hint:
         enriched_query_text = (
@@ -247,6 +261,7 @@ async def regenerate_after_quiz(
 
     return QuizRegenerateResponse(
         answer=response.answer_text,
+        interaction_id=response.interaction_id,
         prompt_version=response.metadata.prompt_version,
         architecture=response.metadata.architecture,
         retrieval_quality=response.metadata.retrieval_quality_flag,

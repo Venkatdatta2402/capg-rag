@@ -1,4 +1,4 @@
-"""Adaptive retry loop logic shared across both architectures.
+"""Adaptive retry loop logic.
 
 When a learner fails to demonstrate understanding, the system retries
 with a narrower query and remedial prompt. Both architectures use the
@@ -46,14 +46,12 @@ class RetryManager:
     async def prepare_retry(
         self, session_id: str, user_id: str, failed_concept: str
     ) -> int:
-        """Increment retry count and flag the knowledge gap.
+        """Increment retry count. Knowledge gaps are captured via quiz scores in session.
 
         Returns:
             The new retry count.
         """
         retry_count = await self._sessions.increment_retry(session_id, user_id)
-        await self._sessions.mark_knowledge_gap(session_id, user_id, failed_concept)
-
         logger.info(
             "retry.prepared",
             session_id=session_id,
@@ -67,10 +65,10 @@ class RetryManager:
     ) -> str:
         """Handle the case when max retries are exhausted.
 
-        Flags the concept as a persistent weak area and returns a
-        graceful escalation message.
+        Knowledge gaps are captured via quiz scores in session.recent_interactions.
+        Long-term profile updates (technically_weak_areas) happen at end-of-session
+        via the SessionReviewAgent, not here.
         """
-        await self._profiles.add_weak_area(user_id, concept)
         logger.warning(
             "retry.max_reached",
             user_id=user_id,

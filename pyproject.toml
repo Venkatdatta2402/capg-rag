@@ -1,5 +1,5 @@
 [project]
-name = "capg-rag"
+name = "pg-carag"
 version = "0.1.0"
 description = "Context-Aware Prompt Governance System for RAG-based AI Applications"
 requires-python = ">=3.12"

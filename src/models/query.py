@@ -1,4 +1,4 @@
-"""Query-related data models used across both architectures."""
+"""Query-related data models."""
 
 from pydantic import BaseModel, Field
 
@@ -24,15 +24,20 @@ class EnrichedQuery(BaseModel):
 
 
 class ContextObject(BaseModel):
-    """Structured context assembled for prompt selection and generation."""
+    """Learner profile and retry state for prompt selection and grounded generation.
 
+    Only carries long-term profile signals and retry state — query-technical
+    fields (topic, query_type, keywords) live in EnrichedQuery.
+    """
+
+    # --- learner profile signals (from long-term memory) ---
     learner_grade: str = ""
-    comprehension_level: str = ""  # low, low-medium, medium, high
-    learning_style: str = ""       # example-driven, text-heavy, visual, etc.
-    weak_areas: list[str] = Field(default_factory=list)
-    session_understood: list[str] = Field(default_factory=list)
-    current_topic: str = ""
-    query_type: str = ""
+    learning_styles: list[str] = Field(default_factory=list)   # learnstyle: tags
+    technically_strong_areas: list[str] = Field(default_factory=list)
+    technically_weak_areas: list[str] = Field(default_factory=list)
+    softskills_strong_areas: list[str] = Field(default_factory=list)  # softskill: tags
+    softskills_weak_areas: list[str] = Field(default_factory=list)    # softskill: tags
+
+    # --- retry state ---
     retry_mode: bool = False
     retry_count: int = 0
-    failed_sub_concept: str = ""

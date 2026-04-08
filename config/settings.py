@@ -6,9 +6,6 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """Application settings driven by .env file or environment variables."""
 
-    # Architecture
-    capg_architecture: str = "A"  # "A" or "B"
-
     # LLM - Generation
     generation_provider: str = "openai"
     generation_model: str = "gpt-4.1"
@@ -31,10 +28,13 @@ class Settings(BaseSettings):
     qdrant_collection: str = "capg_knowledge"
 
     # PostgreSQL
-    database_url: str = "postgresql+asyncpg://user:password@localhost:5432/capg_rag"
+    database_url: str = "postgresql+asyncpg://user:password@localhost:5432/pg_carag"
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
+
+    # Elasticsearch
+    elasticsearch_url: str = "http://localhost:9200"
 
     # Embedding & Reranking
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"

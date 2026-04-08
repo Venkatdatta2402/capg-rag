@@ -25,16 +25,30 @@ class UserProfileStore:
         _profiles[profile.user_id] = profile
         logger.info("user_profile.saved", user_id=profile.user_id)
 
-    async def add_mastered_concept(self, user_id: str, concept: str) -> None:
-        """Add a concept to the learner's mastered list."""
+    async def add_technically_strong_area(self, user_id: str, concept: str) -> None:
+        """Record a concept the learner has mastered."""
         profile = await self.get(user_id)
-        if concept not in profile.mastered_concepts:
-            profile.mastered_concepts.append(concept)
+        if concept not in profile.technically_strong_areas:
+            profile.technically_strong_areas.append(concept)
             await self.save(profile)
 
-    async def add_weak_area(self, user_id: str, area: str) -> None:
-        """Flag a persistent weak area for the learner."""
+    async def add_technically_weak_area(self, user_id: str, area: str) -> None:
+        """Flag a persistent technical weak area for the learner."""
         profile = await self.get(user_id)
-        if area not in profile.weak_areas:
-            profile.weak_areas.append(area)
+        if area not in profile.technically_weak_areas:
+            profile.technically_weak_areas.append(area)
+            await self.save(profile)
+
+    async def add_softskills_strong_area(self, user_id: str, skill: str) -> None:
+        """Record a soft skill strength for the learner."""
+        profile = await self.get(user_id)
+        if skill not in profile.softskills_strong_areas:
+            profile.softskills_strong_areas.append(skill)
+            await self.save(profile)
+
+    async def add_softskills_weak_area(self, user_id: str, skill: str) -> None:
+        """Flag a persistent soft skill gap for the learner."""
+        profile = await self.get(user_id)
+        if skill not in profile.softskills_weak_areas:
+            profile.softskills_weak_areas.append(skill)
             await self.save(profile)

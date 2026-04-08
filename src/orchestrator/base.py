@@ -1,4 +1,4 @@
-"""Base orchestrator interface for both architectures."""
+"""Base orchestrator interface."""
 
 from abc import ABC, abstractmethod
 
@@ -7,20 +7,8 @@ from src.models.response import GenerationResponse
 
 
 class BaseOrchestrator(ABC):
-    """Abstract pipeline orchestrator.
-
-    Both Architecture A and B implement this interface, allowing
-    the API layer to call orchestrator.run() regardless of which
-    architecture is active.
-    """
+    """Abstract pipeline orchestrator."""
 
     @abstractmethod
     async def run(self, query_input: QueryInput) -> GenerationResponse:
-        """Execute the full runtime pipeline for a single interaction.
-
-        Args:
-            query_input: Raw learner input.
-
-        Returns:
-            GenerationResponse with answer and metadata.
-        """
+        """Execute the full pipeline for a single interaction."""

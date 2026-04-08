@@ -10,7 +10,27 @@ from src.prompt_service.canary import CanaryRouter
 
 logger = structlog.get_logger()
 
-# Prompt shown to the LLM to score teaching-style candidates against judge feedback.
+# ── LLM prompt: topic strength estimation ─────────────────────────────────────
+
+_TOPIC_STRENGTH_PROMPT = """\
+You are assessing a learner's likely proficiency in a specific topic based on their long-term profile.
+
+Topic being queried: {topic}
+
+Learner's technically strong areas: {strong_areas}
+Learner's technically weak areas: {weak_areas}
+
+Consider semantic proximity — e.g. "multiplication" as a strong area indicates solid preparation
+for "algebra basics"; "fractions" as a weak area suggests difficulty with "ratio and proportion".
+If the profile provides no clear signal, lean toward WEAK (it is safer to over-support).
+
+Respond with exactly one of these tags (no explanation):
+topic:strong   — the topic aligns clearly with the learner's strengths
+topic:weak     — the topic aligns with known weaknesses, adjacent gaps, or is simply unknown
+"""
+
+# ── LLM prompt: teaching-style candidate scoring against judge feedback ────────
+
 _SCORING_PROMPT = """\
 A student quiz was evaluated and the following learning gaps were identified:
 
@@ -37,7 +57,7 @@ SCORE_{n}: <integer>
 
 
 class PromptSelector:
-    """Selects the appropriate prompt version based on the context object."""
+    """Selects the appropriate prompt version based on learner context and query topic."""
 
     def __init__(
         self,
@@ -47,41 +67,38 @@ class PromptSelector:
     ):
         self._registry = registry
         self._canary = canary_router
-        self._llm = llm          # used only by select_candidates_from_feedback()
+        self._llm = llm
 
-    async def select(self, context: ContextObject) -> PromptVersion:
-        """Select the best prompt version for the given context.
+    async def select(self, context: ContextObject, topic: str) -> PromptVersion:
+        """Select the best prompt by matching context signals to prompt tags.
 
-        Selection rules:
-        - retry_mode=True → remedial variant
-        - comprehension_level="high" → advanced variant
-        - otherwise → standard variant
+        Context signals → tag set:
+          learning_style       → e.g. "example-driven"
+          topic strength (LLM) → "topic-strong" | "topic-weak"
+          softskills_strong    → "softskill-strong"  (if any)
+          softskills_weak      → "softskill-weak"    (if any)
+          retry_mode           → "retry"             (if True)
 
-        If a canary candidate exists, the canary router decides whether to
-        serve the candidate or the control version.
+        Each active prompt is scored by how many of its tags appear in the
+        context tag set. The highest-scoring prompt wins; ties broken by
+        registry order. Falls back to builtins if registry is empty.
         """
-        if context.retry_mode:
-            variant = "remedial"
-        elif context.comprehension_level == "high":
-            variant = "advanced"
-        else:
-            variant = "standard"
-
-        active = await self._registry.list_active(
-            grade=context.learner_grade,
-            variant=variant,
+        topic_strength = await self._estimate_topic_strength(
+            topic=topic,
+            strong_areas=context.technically_strong_areas,
+            weak_areas=context.technically_weak_areas,
         )
 
-        if not active:
-            logger.warning("prompt_selector.no_match", grade=context.learner_grade, variant=variant)
-            return PromptVersion(
-                version_id="default",
-                template="You are a helpful teaching assistant. Answer the student's question clearly.",
-                grade=context.learner_grade,
-                variant=variant,
-            )
+        context_tags = self._build_context_tags(context, topic_strength)
 
-        control = active[0]
+        active = await self._registry.list_active(grade=context.learner_grade)
+
+        if not active:
+            logger.warning("prompt_selector.no_active_prompts", grade=context.learner_grade)
+            fallback = self._best_fallback(context.learner_grade, context_tags)
+            return fallback
+
+        control = self._best_tag_match(active, context_tags)
 
         candidates = await self._registry.list_candidates()
         if candidates:
@@ -89,12 +106,92 @@ class PromptSelector:
             logger.info(
                 "prompt_selector.selected",
                 version_id=selected.version_id,
+                context_tags=list(context_tags),
+                topic_strength=topic_strength,
                 cohort="canary" if selected.version_id != control.version_id else "control",
             )
             return selected
 
-        logger.info("prompt_selector.selected", version_id=control.version_id, cohort="control")
+        logger.info(
+            "prompt_selector.selected",
+            version_id=control.version_id,
+            context_tags=list(context_tags),
+            topic_strength=topic_strength,
+            cohort="control",
+        )
         return control
+
+    # ------------------------------------------------------------------
+    # Tag set construction and matching
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_context_tags(context: ContextObject, topic_strength: str) -> set[str]:
+        """Convert context signals into a set of tags to match against prompt tags.
+
+        Tags added:
+          - All learnstyle: tags from the learner's learning_styles list
+          - topic:strong or topic:weak from LLM estimate
+          - All softskill: tags from both strong and weak areas
+          - retry if retry_mode is True
+        """
+        tags: set[str] = set()
+        tags.update(context.learning_styles)
+        tags.add(topic_strength)  # already "topic:strong" or "topic:weak"
+        tags.update(context.softskills_strong_areas)
+        tags.update(context.softskills_weak_areas)
+        if context.retry_mode:
+            tags.add("retry")
+        return tags
+
+    @staticmethod
+    def _best_tag_match(prompts: list[PromptVersion], context_tags: set[str]) -> PromptVersion:
+        """Return the prompt whose tags have the most overlap with context_tags."""
+        return max(prompts, key=lambda p: len(set(p.tags) & context_tags))
+
+    # ------------------------------------------------------------------
+    # LLM: topic strength estimation
+    # ------------------------------------------------------------------
+
+    async def _estimate_topic_strength(
+        self,
+        topic: str,
+        strong_areas: list[str],
+        weak_areas: list[str],
+    ) -> str:
+        """Ask the LLM whether this topic is STRONG or WEAK for the learner.
+
+        Falls back to WEAK (safer/more supportive) when the LLM is unavailable.
+        """
+        if not self._llm or not topic:
+            return "topic:weak"
+
+        def fmt(lst: list[str]) -> str:
+            return ", ".join(lst) if lst else "none"
+
+        prompt = _TOPIC_STRENGTH_PROMPT.format(
+            topic=topic,
+            strong_areas=fmt(strong_areas),
+            weak_areas=fmt(weak_areas),
+        )
+
+        try:
+            raw = await self._llm.generate(
+                system_prompt="You are a learner proficiency assessor for an educational AI system.",
+                user_message=prompt,
+            )
+            strength = raw.strip().lower().split()[0]
+            if strength not in ("topic:strong", "topic:weak"):
+                logger.warning("prompt_selector.topic_strength_unexpected", raw=raw)
+                return "topic:weak"
+            return strength
+        except Exception as exc:
+            logger.warning("prompt_selector.topic_strength_failed", error=str(exc))
+            return "topic:weak"
+
+    # ------------------------------------------------------------------
+    # Feedback-aware candidate selection (used by /quiz/submit on FAILED)
+    # ------------------------------------------------------------------
 
     async def select_candidates_from_feedback(
         self,
@@ -104,14 +201,9 @@ class PromptSelector:
     ) -> list[PromptVersion]:
         """Return the n most suitable teaching-style prompts for the identified gaps.
 
-        The judge's retrieval_feedback describes what concepts were missing from
-        the learner's understanding. This method uses an LLM to score every active
-        prompt (by its description + tags) against that feedback, then returns the
-        top n — one per distinct variant so the MCQ choices are always meaningfully
-        different teaching styles, not three flavours of the same approach.
-
-        Falls back to one-per-variant selection when no LLM is configured or the
-        registry is empty (safe for unit tests and early-stage deployments).
+        Uses an LLM to score every active prompt against the judge's retrieval_feedback,
+        returning the top n — one per distinct variant for meaningful MCQ diversity.
+        Falls back to one-per-variant when no LLM is configured.
         """
         active = await self._registry.list_active(grade=grade)
 
@@ -119,12 +211,10 @@ class PromptSelector:
             logger.warning("prompt_selector.no_active_prompts", grade=grade)
             return self._builtin_fallbacks(grade, n)
 
-        # Without an LLM, fall back to one-per-variant (no feedback scoring)
         if not self._llm or not retrieval_feedback.strip():
             logger.info("prompt_selector.feedback_scoring_skipped", reason="no llm or empty feedback")
             return self._one_per_variant(active, n)
 
-        # Build the candidates block for the scoring prompt
         candidates_block = "\n".join(
             f"Candidate {i + 1}: {v.description or v.variant.capitalize()} "
             f"[tags: {', '.join(v.tags) or 'none'}]"
@@ -147,7 +237,6 @@ class PromptSelector:
             logger.warning("prompt_selector.scoring_failed", error=str(exc))
             return self._one_per_variant(active, n)
 
-        # Rank by score descending; deduplicate by variant so MCQ choices are diverse
         ranked = sorted(zip(scores, active), key=lambda x: -x[0])
         seen_variants: set[str] = set()
         chosen: list[PromptVersion] = []
@@ -158,7 +247,6 @@ class PromptSelector:
             if len(chosen) == n:
                 break
 
-        # Pad with fallbacks if fewer than n distinct variants exist in registry
         if len(chosen) < n:
             for fb in self._builtin_fallbacks(grade, n):
                 if fb.variant not in seen_variants:
@@ -179,9 +267,14 @@ class PromptSelector:
     # Helpers
     # ------------------------------------------------------------------
 
+    @classmethod
+    def _best_fallback(cls, grade: str, context_tags: set[str]) -> PromptVersion:
+        """Pick the best-matching builtin when the registry is empty."""
+        fallbacks = cls._builtin_fallbacks(grade, n=3)
+        return cls._best_tag_match(fallbacks, context_tags)
+
     @staticmethod
     def _parse_scores(raw: str, expected: int) -> list[float]:
-        """Parse SCORE_N: <value> lines into a float list."""
         scores: list[float] = []
         for line in raw.strip().split("\n"):
             if line.upper().startswith("SCORE_"):
@@ -189,7 +282,6 @@ class PromptSelector:
                     scores.append(float(line.split(":")[-1].strip()))
                 except ValueError:
                     scores.append(0.0)
-        # Pad or trim to expected length
         while len(scores) < expected:
             scores.append(0.0)
         return scores[:expected]
@@ -218,7 +310,11 @@ class PromptSelector:
                 grade=grade,
                 variant="standard",
                 description="Step-by-step explanation with everyday examples",
-                tags=["step-by-step", "conceptual", "examples"],
+                tags=[
+                    "learnstyle:example_driven", "learnstyle:step_by_step",
+                    "learnstyle:immediate_feedback",
+                    "topic:weak",
+                ],
             ),
             PromptVersion(
                 version_id="builtin_remedial",
@@ -230,7 +326,13 @@ class PromptSelector:
                 grade=grade,
                 variant="remedial",
                 description="Ultra-simplified breakdown with analogies for struggling learners",
-                tags=["analogy", "scaffolded", "remedial", "slow-paced"],
+                tags=[
+                    "learnstyle:guided", "learnstyle:step_by_step", "learnstyle:hint_sensitive",
+                    "learnstyle:immediate_feedback",
+                    "topic:weak",
+                    "softskill:attention_control", "softskill:working_memory",
+                    "retry",
+                ],
             ),
             PromptVersion(
                 version_id="builtin_advanced",
@@ -242,7 +344,12 @@ class PromptSelector:
                 grade=grade,
                 variant="advanced",
                 description="Rigorous explanation with cross-chapter connections and application",
-                tags=["application", "cross-chapter", "advanced", "higher-order"],
+                tags=[
+                    "learnstyle:abstract_first", "learnstyle:challenge_based",
+                    "learnstyle:exploratory", "learnstyle:delayed_reflection",
+                    "topic:strong",
+                    "softskill:abstraction", "softskill:pattern_mapping",
+                ],
             ),
         ]
         return fallbacks[:n]

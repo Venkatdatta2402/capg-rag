@@ -1,4 +1,4 @@
-name: capg-rag
+name: pg-carag
 channels:
   - conda-forge
   - defaults

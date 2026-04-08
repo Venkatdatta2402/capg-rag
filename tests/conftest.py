@@ -23,10 +23,11 @@ def sample_profile():
         user_id="test_user_1",
         grade="Class 3",
         board="CBSE",
-        comprehension_score=5.0,
-        learning_style="example-driven",
-        weak_areas=["unit conversion"],
-        mastered_concepts=["division", "multiplication"],
+        learning_styles=["learnstyle:example_driven", "learnstyle:step_by_step", "learnstyle:immediate_feedback"],
+        technically_strong_areas=["division", "multiplication"],
+        technically_weak_areas=["unit conversion"],
+        softskills_strong_areas=["softskill:pattern_mapping"],
+        softskills_weak_areas=["softskill:attention_control"],
     )
 
 
@@ -35,8 +36,6 @@ def sample_session():
     return SessionState(
         session_id="test_session_1",
         user_id="test_user_1",
-        topics_discussed=["length introduction"],
-        concepts_understood=["what is a metre"],
     )
 
 
@@ -57,12 +56,11 @@ def sample_enriched_query():
 def sample_context():
     return ContextObject(
         learner_grade="Class 3",
-        comprehension_level="low-medium",
-        learning_style="example-driven",
-        weak_areas=["unit conversion"],
-        session_understood=["what is a metre"],
-        current_topic="Measurement",
-        query_type="conceptual_and_procedural",
+        learning_styles=["learnstyle:example_driven", "learnstyle:step_by_step", "learnstyle:immediate_feedback"],
+        technically_strong_areas=["division", "multiplication"],
+        technically_weak_areas=["unit conversion"],
+        softskills_strong_areas=["softskill:pattern_mapping"],
+        softskills_weak_areas=["softskill:attention_control"],
     )
 
 

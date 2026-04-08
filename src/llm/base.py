@@ -16,3 +16,20 @@ class BaseLLMClient(ABC):
     @abstractmethod
     async def generate_with_messages(self, messages: list[dict]) -> str:
         """Generate a completion from a full message list."""
+
+    @abstractmethod
+    async def generate_with_tools(
+        self,
+        system_prompt: str,
+        user_message: str,
+        tools: list[dict],
+    ) -> tuple[str, list[dict]]:
+        """Generate with tool definitions.
+
+        Returns:
+            (content, tool_calls) where:
+              content:    The text portion of the response (may be empty).
+              tool_calls: List of tool call dicts, each with keys:
+                            "name"      — tool name
+                            "arguments" — parsed dict of arguments
+        """
