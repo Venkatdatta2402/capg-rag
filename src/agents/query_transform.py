@@ -1,38 +1,41 @@
 """Query Transformation Agent.
 
-Focused purely on retrieval optimization — rewrites the raw student query
-into a structured, keyword-enriched form that maximises NCERT chunk recall.
-Domain keywords from the keyword store are injected so the model selects
-precise NCERT terms rather than guessing.
+Rewrites the raw student query into a retrieval-optimized form.
+Receives chunk-level keywords and concepts from the initial broad retrieval pass
+so it can incorporate precise NCERT signals into the rewrite rather than guessing.
+
+session_context is passed for normal queries (disambiguation from prior session topics).
+It is omitted when the question comes from the judge (already focused).
 """
 
 import structlog
 
 from src.agents.base import BaseAgent
 from src.llm.base import BaseLLMClient
-from src.models.learner import LearnerProfile
 from src.models.query import EnrichedQuery, QueryInput
+from src.models.retrieval import RetrievalResult
 
 logger = structlog.get_logger()
 
 QUERY_TRANSFORM_PROMPT = """\
 You are a query transformation agent for a CBSE/NCERT educational knowledge base.
 
-Your ONLY job is to rewrite the student's raw query to maximize retrieval quality.
+Your job is to rewrite the student's raw query to maximize second-pass retrieval quality.
 
 Given:
 - Student grade: {grade}
-- Subject context (if detectable): based on query content
 - Raw query: {query}
-
-Domain keyword pool (curated from the {grade} {subject} NCERT textbook):
-{domain_keywords}
+{session_block}\
+Signals extracted from initially retrieved chunks (keywords and concepts from the knowledge base):
+Keywords: {chunk_keywords}
+Concepts: {chunk_concepts}
 
 You must:
 1. Identify the subject, topic, and sub-topic.
-2. Select the most relevant keywords from the domain keyword pool above
-   AND add any additional CBSE/NCERT terms you identify from the query.
-3. Rewrite the query to be specific, unambiguous, and retrieval-friendly.
+2. From the chunk signals above, select the keywords and concepts that are directly \
+relevant to the query. Discard unrelated ones. Add any additional NCERT terms you identify.
+3. Rewrite the query to be specific, unambiguous, and retrieval-friendly, incorporating \
+the selected signals.
 4. Include chapter and section hints if identifiable.
 
 Respond in this exact format:
@@ -42,13 +45,13 @@ SUB_TOPIC: <sub_topic>
 CHAPTER_HINT: <chapter name if identifiable, else UNKNOWN>
 SECTION_HINT: <section name if identifiable, else UNKNOWN>
 QUERY_TYPE: <conceptual|procedural|conceptual_and_procedural>
-KEYWORDS: <comma-separated list combining domain keywords + any additional terms>
+KEYWORDS: <comma-separated list of selected + additional NCERT terms>
 REWRITTEN_QUERY: <the optimized query for retrieval>
 """
 
 
 class QueryTransformAgent(BaseAgent):
-    """Rewrites the raw query into a retrieval-optimized form with NCERT keywords."""
+    """Rewrites the raw query using chunk signals from initial retrieval."""
 
     def __init__(self, llm: BaseLLMClient):
         super().__init__(llm)
@@ -56,30 +59,33 @@ class QueryTransformAgent(BaseAgent):
     async def run(
         self,
         query_input: QueryInput,
-        profile: LearnerProfile,
-        domain_keywords: list[str] | None = None,
+        grade: str,
+        initial_chunks: list[RetrievalResult] | None = None,
+        session_context: str = "",
     ) -> EnrichedQuery:
-        """Transform the raw query for retrieval.
+        """Transform the raw query for second-pass retrieval.
 
         Args:
             query_input: Raw user input.
-            profile: Learner profile for grade context.
-            domain_keywords: Curated keywords from the keyword store for this
-                             grade+subject. Injected so the model selects precise
-                             NCERT terms rather than guessing.
+            grade: Learner grade for NCERT scope.
+            initial_chunks: Chunks from initial broad retrieval — keywords/concepts
+                            are pooled and passed as signals for the rewrite.
+            session_context: Session history summary for query disambiguation.
+                             Empty when query comes from the judge.
         """
-        keywords_text = (
-            ", ".join(domain_keywords) if domain_keywords
-            else "No domain keywords available — infer from query content."
+        chunk_keywords, chunk_concepts = _pool_signals(initial_chunks or [])
+
+        session_block = (
+            f"Session context:\n{session_context}\n\n"
+            if session_context else ""
         )
 
-        subject_hint = profile.grade  # model detects subject from query
-
         prompt = QUERY_TRANSFORM_PROMPT.format(
-            grade=profile.grade,
-            subject=subject_hint,
+            grade=grade,
             query=query_input.query_text,
-            domain_keywords=keywords_text,
+            session_block=session_block,
+            chunk_keywords=", ".join(chunk_keywords) if chunk_keywords else "none",
+            chunk_concepts=", ".join(chunk_concepts) if chunk_concepts else "none",
         )
 
         response = await self._llm.generate(
@@ -112,3 +118,23 @@ class QueryTransformAgent(BaseAgent):
             sub_topic=parsed.get("SUB_TOPIC", ""),
             query_type=parsed.get("QUERY_TYPE", ""),
         )
+
+
+def _pool_signals(chunks: list[RetrievalResult]) -> tuple[list[str], list[str]]:
+    """Deduplicate and pool keywords + concepts across all initial chunks."""
+    seen_kw: set[str] = set()
+    seen_co: set[str] = set()
+    keywords: list[str] = []
+    concepts: list[str] = []
+
+    for chunk in chunks:
+        for kw in chunk.keywords:
+            if kw.lower() not in seen_kw:
+                seen_kw.add(kw.lower())
+                keywords.append(kw)
+        for co in chunk.concepts:
+            if co.lower() not in seen_co:
+                seen_co.add(co.lower())
+                concepts.append(co)
+
+    return keywords, concepts

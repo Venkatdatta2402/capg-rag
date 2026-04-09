@@ -1,4 +1,4 @@
-"""Indexer — embeds and indexes chunks into the vector store."""
+"""Indexer — embeds and indexes enriched chunks into the vector store."""
 
 import structlog
 
@@ -15,7 +15,7 @@ class Indexer:
         self._vector_store = VectorStore()
 
     async def index(self, chunks: list[Chunk]) -> int:
-        """Embed and index a list of chunks.
+        """Embed and index a list of chunks. Expects enrichment already done.
 
         Returns:
             Number of chunks indexed.
@@ -40,6 +40,8 @@ class Indexer:
                     "page_number": chunk.page_number,
                     **chunk.metadata,
                 },
+                keywords=chunk.keywords,
+                concepts=chunk.concepts,
             )
 
         logger.info("indexer.done", chunks_indexed=len(chunks))

@@ -34,13 +34,26 @@ class VectorStore:
         """Encode texts into dense vectors."""
         return self._encoder.encode(texts, convert_to_numpy=True).tolist()
 
-    async def upsert(self, chunk_id: str, text: str, metadata: dict) -> None:
-        """Index a single chunk."""
+    async def upsert(
+        self,
+        chunk_id: str,
+        text: str,
+        metadata: dict,
+        keywords: list[str] | None = None,
+        concepts: list[str] | None = None,
+    ) -> None:
+        """Index a single chunk with optional enrichment signals."""
         vector = self.encode([text])[0]
         point = PointStruct(
             id=hash(chunk_id) % (2**63),
             vector=vector,
-            payload={"chunk_id": chunk_id, "text": text, **metadata},
+            payload={
+                "chunk_id": chunk_id,
+                "text": text,
+                "keywords": keywords or [],
+                "concepts": concepts or [],
+                **metadata,
+            },
         )
         await self._client.upsert(collection_name=self._collection, points=[point])
 
@@ -124,5 +137,7 @@ class VectorStore:
             subsection_number=p.get("subsection_number", ""),
             subsection_title=p.get("subsection_title", ""),
             score=hit.score,
+            keywords=p.get("keywords", []),
+            concepts=p.get("concepts", []),
             metadata=p,
         )

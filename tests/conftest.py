@@ -3,7 +3,9 @@
 import pytest
 
 from src.models.query import QueryInput, EnrichedQuery, ContextObject
-from src.models.learner import LearnerProfile, SessionState
+from src.models.learner import SessionState
+from src.models.profile_document import LearnerProfileDocument, SkillEntry
+
 from src.models.retrieval import RetrievalResult, RerankedChunk
 from src.models.prompt import PromptVersion
 
@@ -18,16 +20,25 @@ def sample_query_input():
 
 
 @pytest.fixture
-def sample_profile():
-    return LearnerProfile(
-        user_id="test_user_1",
+def sample_profile_doc():
+    return LearnerProfileDocument(
+        learner_id="test_user_1",
         grade="Class 3",
         board="CBSE",
-        learning_styles=["learnstyle:example_driven", "learnstyle:step_by_step", "learnstyle:immediate_feedback"],
-        technically_strong_areas=["division", "multiplication"],
-        technically_weak_areas=["unit conversion"],
-        softskills_strong_areas=["softskill:pattern_mapping"],
-        softskills_weak_areas=["softskill:attention_control"],
+        technical_skills={
+            "division": SkillEntry(score=0.8, count=10),
+            "multiplication": SkillEntry(score=0.7, count=8),
+            "unit conversion": SkillEntry(score=-0.3, count=5),
+        },
+        softskills={
+            "pattern_mapping": SkillEntry(score=0.6, count=7),
+            "attention_control": SkillEntry(score=-0.4, count=6),
+        },
+        learning_style={
+            "example_driven": SkillEntry(score=0.9, count=12),
+            "step_by_step": SkillEntry(score=0.7, count=10),
+            "immediate_feedback": SkillEntry(score=0.5, count=8),
+        },
     )
 
 
@@ -55,12 +66,11 @@ def sample_enriched_query():
 @pytest.fixture
 def sample_context():
     return ContextObject(
-        learner_grade="Class 3",
-        learning_styles=["learnstyle:example_driven", "learnstyle:step_by_step", "learnstyle:immediate_feedback"],
-        technically_strong_areas=["division", "multiplication"],
-        technically_weak_areas=["unit conversion"],
-        softskills_strong_areas=["softskill:pattern_mapping"],
-        softskills_weak_areas=["softskill:attention_control"],
+        grade="Class 3",
+        learning_styles=["learnstyle:example_driven", "learnstyle:step_by_step"],
+        softskills_strong=["softskill:pattern_mapping"],
+        softskills_weak=["softskill:attention_control"],
+        topic_strength="topic:weak",
     )
 
 

@@ -10,11 +10,11 @@ class Settings(BaseSettings):
     generation_provider: str = "openai"
     generation_model: str = "gpt-4.1"
 
-    # LLM - Context / Rephrase (lightweight)
+    # LLM - Context / Query Transform (lightweight)
     context_provider: str = "openai"
     context_model: str = "gpt-4o-mini"
 
-    # LLM - Judge (Arch A only; Arch B reuses generation model)
+    # LLM - Judge / Session Review / Eval
     judge_provider: str = "openai"
     judge_model: str = "gpt-4o-mini"
 
@@ -26,12 +26,7 @@ class Settings(BaseSettings):
     qdrant_host: str = "localhost"
     qdrant_port: int = 6333
     qdrant_collection: str = "capg_knowledge"
-
-    # PostgreSQL
-    database_url: str = "postgresql+asyncpg://user:password@localhost:5432/pg_carag"
-
-    # Redis
-    redis_url: str = "redis://localhost:6379/0"
+    qdrant_hierarchy_collection: str = "capg_hierarchy"
 
     # Elasticsearch
     elasticsearch_url: str = "http://localhost:9200"
@@ -44,13 +39,12 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
-    # Canary
+    # Canary (governance — planned)
     canary_traffic_percent: int = 5
 
     # Retrieval
     top_k_retrieval: int = 20
     top_k_rerank: int = 5
-    max_retries: int = 3
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

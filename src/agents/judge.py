@@ -16,6 +16,13 @@ from src.models.feedback import JudgeVerdict
 
 logger = structlog.get_logger()
 
+_FOLLOW_UP_SYSTEM_PROMPT = """\
+You are diagnosing a knowledge gap after a student failed a quiz.
+Generate ONE focused question phrased naturally as a student asking their tutor,
+targeting the identified gap so the tutor re-explains exactly what was missed.
+Respond with just the question — no preamble, no label.
+"""
+
 _FEEDBACK_SYSTEM_PROMPT = """\
 You are a diagnostic evaluator for an educational AI system.
 
@@ -35,6 +42,38 @@ class JudgeAgent(BaseAgent):
 
     def __init__(self, llm: BaseLLMClient):
         super().__init__(llm)
+
+    async def generate_follow_up_question(
+        self,
+        topic: str,
+        retrieval_feedback: str,
+        model_answer: str,
+        session_context: str = "",
+    ) -> str:
+        """Generate a student-phrased follow-up question targeting the knowledge gap.
+
+        Called on quiz FAILED. The question is fed directly into the pipeline
+        as the next query, with retry_mode already set on the ContextObject.
+        """
+        session_block = f"\nSession history:\n{session_context}" if session_context else ""
+        user_msg = (
+            f"Topic: {topic}\n"
+            f"Explanation the student received:\n{model_answer}\n\n"
+            f"Identified gaps from wrong answers: {retrieval_feedback}"
+            f"{session_block}"
+        )
+        try:
+            question = await self._llm.generate(
+                system_prompt=_FOLLOW_UP_SYSTEM_PROMPT,
+                user_message=user_msg,
+            )
+            question = question.strip().strip('"')
+            logger.info("judge.follow_up_generated", topic=topic, question=question[:80])
+            return question
+        except Exception as exc:
+            logger.warning("judge.follow_up_failed", error=str(exc))
+            # Fallback: generic re-ask using the retrieval feedback
+            return f"Can you explain {retrieval_feedback or topic} in more detail?"
 
     async def grade_mcq(
         self,
@@ -64,7 +103,6 @@ class JudgeAgent(BaseAgent):
             verdict = JudgeVerdict(
                 verdict="UNDERSTOOD",
                 cot_reasoning="",
-                check_mode="mcq",
                 question_asked=question,
                 learner_response=selected_option,
                 retrieval_feedback="",
@@ -85,7 +123,6 @@ class JudgeAgent(BaseAgent):
         verdict = JudgeVerdict(
             verdict="NOT_UNDERSTOOD",
             cot_reasoning=rationale,
-            check_mode="mcq",
             question_asked=question,
             learner_response=selected_option,
             retrieval_feedback=retrieval_feedback,

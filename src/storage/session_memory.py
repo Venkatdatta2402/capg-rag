@@ -127,12 +127,6 @@ class SessionMemoryStore:
     # Session mutations
     # ----------------------------------------------------------------
 
-    async def increment_retry(self, session_id: str, user_id: str) -> int:
-        state = await self.get(session_id, user_id)
-        state.retry_count += 1
-        await self.save(state)
-        return state.retry_count
-
     async def append_interaction(
         self,
         session_id: str,

@@ -28,6 +28,8 @@ class RetrievalResult(BaseModel):
     subsection_title: str = ""      # e.g. "Root Hair"
 
     score: float = 0.0              # similarity or BM25 score
+    keywords: list[str] = Field(default_factory=list)   # chunk-level domain keywords (from ingestion enrichment)
+    concepts: list[str] = Field(default_factory=list)   # chunk-level high-level concepts (from ingestion enrichment)
     metadata: dict = Field(default_factory=dict)
 
 
@@ -51,4 +53,6 @@ class RerankedChunk(BaseModel):
 
     original_score: float = 0.0
     rerank_score: float = 0.0
+    keywords: list[str] = Field(default_factory=list)
+    concepts: list[str] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict)

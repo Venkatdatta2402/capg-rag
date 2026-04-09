@@ -24,20 +24,22 @@ class EnrichedQuery(BaseModel):
 
 
 class ContextObject(BaseModel):
-    """Learner profile and retry state for prompt selection and grounded generation.
+    """Output of the PromptSelector for one turn.
 
-    Only carries long-term profile signals and retry state — query-technical
-    fields (topic, query_type, keywords) live in EnrichedQuery.
+    All fields except retry_mode/retry_count are reasoned by the LLM in a single
+    call that considers both the LearnerProfileDocument scores and the current query.
+
+    retry_mode and retry_count are written by the judge path (set_retry_mode) and
+    read back on the next turn.
     """
 
-    # --- learner profile signals (from long-term memory) ---
-    learner_grade: str = ""
+    # --- LLM-reasoned from profile + query ---
+    grade: str = ""
     learning_styles: list[str] = Field(default_factory=list)   # learnstyle: tags
-    technically_strong_areas: list[str] = Field(default_factory=list)
-    technically_weak_areas: list[str] = Field(default_factory=list)
-    softskills_strong_areas: list[str] = Field(default_factory=list)  # softskill: tags
-    softskills_weak_areas: list[str] = Field(default_factory=list)    # softskill: tags
+    softskills_strong: list[str] = Field(default_factory=list)  # softskill: tags
+    softskills_weak: list[str] = Field(default_factory=list)    # softskill: tags
+    topic_strength: str = "topic:weak"                          # "topic:strong" | "topic:weak"
 
-    # --- retry state ---
+    # --- written by judge path ---
     retry_mode: bool = False
     retry_count: int = 0

@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 
-from api.routes import chat, ingest, keywords, prompts, quiz, session
+from api.routes import chat, ingest, prompts, quiz, session
 from config.settings import settings
 
 logger = structlog.get_logger()
@@ -34,7 +34,6 @@ app.include_router(chat.router, tags=["Chat"])
 app.include_router(quiz.router, tags=["Quiz"])
 app.include_router(session.router, tags=["Session"])
 app.include_router(ingest.router, tags=["Ingestion"])
-app.include_router(keywords.router, tags=["Keywords"])
 app.include_router(prompts.router, tags=["Prompts"])
 
 

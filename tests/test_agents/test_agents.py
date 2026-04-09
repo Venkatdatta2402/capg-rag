@@ -4,7 +4,6 @@ import pytest
 from unittest.mock import AsyncMock
 
 from src.agents.query_transform import QueryTransformAgent
-from src.agents.context_builder import ContextObjectBuilder
 from src.agents.judge import JudgeAgent
 
 
@@ -26,35 +25,13 @@ class TestQueryTransformAgent:
         return llm
 
     @pytest.mark.asyncio
-    async def test_transform_produces_keywords(self, mock_llm, sample_query_input, sample_profile):
+    async def test_transform_produces_keywords(self, mock_llm, sample_query_input):
         agent = QueryTransformAgent(mock_llm)
-        enriched = await agent.run(sample_query_input, sample_profile)
+        enriched = await agent.run(sample_query_input, grade="Class 5")
 
         assert "metre" in enriched.keywords
         assert enriched.subject == "Mathematics"
         assert enriched.rewritten_text != sample_query_input.query_text
-
-
-class TestContextObjectBuilder:
-    def test_builds_context_from_profile(self, sample_profile, sample_session):
-        builder = ContextObjectBuilder()
-        context = builder.build(sample_profile, sample_session)
-
-        assert context.learner_grade == sample_profile.grade
-        assert context.learning_styles == sample_profile.learning_styles
-        assert context.technically_strong_areas == sample_profile.technically_strong_areas
-        assert context.technically_weak_areas == sample_profile.technically_weak_areas
-
-    def test_retry_mode_from_session(self, sample_profile, sample_session):
-        builder = ContextObjectBuilder()
-
-        sample_session.retry_count = 0
-        assert builder.build(sample_profile, sample_session).retry_mode is False
-
-        sample_session.retry_count = 2
-        ctx = builder.build(sample_profile, sample_session)
-        assert ctx.retry_mode is True
-        assert ctx.retry_count == 2
 
 
 class TestJudgeAgent:

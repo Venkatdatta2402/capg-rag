@@ -1,17 +1,17 @@
-"""Quiz submission and regeneration endpoints.
+"""Quiz submission endpoint.
 
-Flow overview:
-  1. POST /quiz/submit
-       - Loads quiz questions + correct answers from InteractionStore (ES)
-       - Grades each submitted option deterministically (selected == correct)
-       - If wrong: judge LLM generates retrieval_feedback for that question
-       - Updates the interaction document in ES with student_response + quiz.status
-       - If FAILED: returns 3 prompt MCQ choices + aggregated retrieval_feedback
-
-  2. POST /quiz/regenerate  (called after learner picks a prompt MCQ choice)
-       - Re-runs the full pipeline with retrieval_hint appended to original query
-       - Chosen prompt version bypasses the selector
-       - Returns a fresh answer + new quiz_form
+POST /quiz/submit
+  - Loads quiz questions + correct answers from InteractionStore (ES)
+  - Grades each submitted option deterministically (selected == correct)
+  - Judge LLM called only on wrong answers to generate retrieval_feedback
+  - Updates the interaction document in ES with student_response + quiz.status
+  - If PASSED: returns verdicts
+  - If FAILED:
+      1. Loads session memory from ES for judge context
+      2. Judge generates a focused follow-up question targeting the knowledge gap
+      3. set_retry_mode on ContextObject so selector picks a remedial prompt
+      4. Runs the full pipeline with the judge's question
+      5. Returns verdicts + follow-up answer + new quiz
 """
 
 from datetime import datetime
@@ -19,13 +19,12 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.dependencies import get_interaction_store, get_pipeline, get_prompt_selector, get_session_store
+from api.dependencies import get_interaction_store, get_pipeline, get_session_store
 from src.agents.judge import JudgeAgent
 from src.models.interaction import StudentAnswer, StudentResponse
 from src.models.query import QueryInput
 from src.models.response import QuizForm
 from src.orchestrator.pipeline import Pipeline
-from src.prompt_service.selector import PromptSelector
 from src.storage.interaction_store import InteractionStore
 from src.storage.session_memory import SessionMemoryStore
 
@@ -58,62 +57,17 @@ class QuestionVerdict(BaseModel):
     retrieval_feedback: str
 
 
-class PromptChoice(BaseModel):
-    version_id: str
-    variant: str
-    label: str
-    template_preview: str
-
-
 class QuizSubmitResponse(BaseModel):
     quiz_id: str
     overall: str            # PASSED | FAILED
     passed_count: int
     total_questions: int
     verdicts: list[QuestionVerdict]
-    prompt_choices: list[PromptChoice] = []
-    retrieval_hint: str = ""
-
-
-class QuizRegenerateRequest(BaseModel):
-    original_query: str
-    user_id: str
-    session_id: str
-    chosen_prompt_version_id: str
-    retrieval_hint: str = ""
-
-
-class QuizRegenerateResponse(BaseModel):
-    answer: str
-    interaction_id: str
-    prompt_version: str
-    architecture: str
-    retrieval_quality: str
-    latency_ms: float
-    quiz_form: QuizForm
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_VARIANT_LABELS = {
-    "standard": "Clear step-by-step explanation",
-    "remedial": "Extra support with analogies",
-    "advanced": "Deeper connections and application",
-}
-
-
-def _build_prompt_choices(versions) -> list[PromptChoice]:
-    return [
-        PromptChoice(
-            version_id=v.version_id,
-            variant=v.variant,
-            label=_VARIANT_LABELS.get(v.variant, v.variant.capitalize()),
-            template_preview=v.template[:120],
-        )
-        for v in versions
-    ]
+    # FAILED only — judge-generated follow-up
+    follow_up_question: str = ""
+    follow_up_answer: str = ""
+    follow_up_interaction_id: str = ""
+    follow_up_quiz_form: QuizForm | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -125,10 +79,9 @@ async def submit_quiz(
     request: QuizSubmitRequest,
     pipeline: Pipeline = Depends(get_pipeline),
     interaction_store: InteractionStore = Depends(get_interaction_store),
-    selector: PromptSelector = Depends(get_prompt_selector),
     session_store: SessionMemoryStore = Depends(get_session_store),
 ):
-    """Grade MCQ answers deterministically; call judge LLM only on wrong answers."""
+    """Grade MCQ answers deterministically; on FAILED run judge follow-up pipeline."""
     session_doc = await interaction_store.get_session(request.quiz_id)
     if not session_doc:
         raise HTTPException(status_code=404, detail="Session not found.")
@@ -143,12 +96,10 @@ async def submit_quiz(
     if interaction.quiz.status == "submitted":
         raise HTTPException(status_code=409, detail="Quiz already submitted.")
 
-    grade = session_doc.grade
     explanation = interaction.model_answer
     topic = interaction.meta.topic
     judge: JudgeAgent = pipeline.judge_agent
 
-    # Build lookup: question_id → QuizQuestion (with correct_answer)
     question_map = {q.question_id: q for q in interaction.quiz.questions}
     submitted = {a.question_id: a.selected_option for a in request.answers}
 
@@ -182,7 +133,6 @@ async def submit_quiz(
     overall = "PASSED" if len(passed) >= 2 else "FAILED"
     score = len(passed)
 
-    # Update ES interaction with student response
     student_response = StudentResponse(
         answers=student_answers,
         score=score,
@@ -195,7 +145,6 @@ async def submit_quiz(
         quiz_status="submitted",
     )
 
-    # Mirror quiz outcome to runtime session memory for context agents
     await session_store.update_quiz_result(
         session_id=request.quiz_id,
         user_id=request.user_id,
@@ -204,25 +153,45 @@ async def submit_quiz(
         quiz_status="submitted",
     )
 
-    prompt_choices: list[PromptChoice] = []
-    retrieval_hint = ""
-
-    if overall == "FAILED":
-        feedbacks = [v.retrieval_feedback for v in verdicts if v.retrieval_feedback]
-        retrieval_hint = "; ".join(feedbacks)
-
-        # Set retry_mode on the persisted ContextObject for next pipeline run
-        await session_store.set_retry_mode(
-            session_id=request.quiz_id,
-            user_id=request.user_id,
+    if overall == "PASSED":
+        return QuizSubmitResponse(
+            quiz_id=request.quiz_id,
+            overall=overall,
+            passed_count=score,
+            total_questions=len(verdicts),
+            verdicts=verdicts,
         )
 
-        candidate_versions = await selector.select_candidates_from_feedback(
-            grade=grade,
-            retrieval_feedback=retrieval_hint or "general comprehension failure",
-            n=3,
-        )
-        prompt_choices = _build_prompt_choices(candidate_versions)
+    # --- FAILED path ---
+
+    # Load session memory for judge context
+    session = await session_store.get(session_id=request.quiz_id, user_id=request.user_id)
+    session_context = _format_session_context(session)
+
+    # Aggregate retrieval feedback from wrong answers
+    retrieval_feedback = "; ".join(v.retrieval_feedback for v in verdicts if v.retrieval_feedback)
+
+    # Judge generates a focused question targeting the gap
+    follow_up_question = await judge.generate_follow_up_question(
+        topic=topic,
+        retrieval_feedback=retrieval_feedback or "general comprehension gap",
+        model_answer=explanation,
+        session_context=session_context,
+    )
+
+    # Set retry_mode so selector picks a remedial prompt for the follow-up run
+    await session_store.set_retry_mode(
+        session_id=request.quiz_id,
+        user_id=request.user_id,
+    )
+
+    # Re-run pipeline with judge's question (skips session context in transform_query)
+    follow_up_input = QueryInput(
+        query_text=follow_up_question,
+        user_id=request.user_id,
+        session_id=request.quiz_id,
+    )
+    follow_up_response = await pipeline.run_judge_followup(follow_up_input)
 
     return QuizSubmitResponse(
         quiz_id=request.quiz_id,
@@ -230,41 +199,28 @@ async def submit_quiz(
         passed_count=score,
         total_questions=len(verdicts),
         verdicts=verdicts,
-        prompt_choices=prompt_choices,
-        retrieval_hint=retrieval_hint,
+        follow_up_question=follow_up_question,
+        follow_up_answer=follow_up_response.answer_text,
+        follow_up_interaction_id=follow_up_response.interaction_id,
+        follow_up_quiz_form=follow_up_response.quiz_form,
     )
 
 
-@router.post("/quiz/regenerate", response_model=QuizRegenerateResponse)
-async def regenerate_after_quiz(
-    request: QuizRegenerateRequest,
-    pipeline: Pipeline = Depends(get_pipeline),
-):
-    """Re-run the pipeline with the learner's chosen prompt and a retrieval hint."""
-    enriched_query_text = request.original_query
-    if request.retrieval_hint:
-        enriched_query_text = (
-            f"{request.original_query}\n"
-            f"[Focus also on: {request.retrieval_hint}]"
-        )
-
-    query_input = QueryInput(
-        query_text=enriched_query_text,
-        user_id=request.user_id,
-        session_id=request.session_id,
-    )
-
-    response = await pipeline.run_with_prompt_override(
-        query_input=query_input,
-        prompt_version_id=request.chosen_prompt_version_id,
-    )
-
-    return QuizRegenerateResponse(
-        answer=response.answer_text,
-        interaction_id=response.interaction_id,
-        prompt_version=response.metadata.prompt_version,
-        architecture=response.metadata.architecture,
-        retrieval_quality=response.metadata.retrieval_quality_flag,
-        latency_ms=response.metadata.latency_ms,
-        quiz_form=response.quiz_form,
-    )
+def _format_session_context(session) -> str:
+    if not session:
+        return ""
+    parts = []
+    past = session.summary_of_past
+    if past.covered_topics:
+        parts.append(f"Covered topics: {', '.join(past.covered_topics)}")
+    if past.performance_trend != "unknown":
+        parts.append(f"Performance trend: {past.performance_trend}")
+    if session.recent_interactions:
+        recent = [
+            f"{ix.topic} (quiz={ix.quiz_status}, score={ix.score})"
+            for ix in session.recent_interactions[-3:]
+            if ix.topic
+        ]
+        if recent:
+            parts.append(f"Recent: {'; '.join(recent)}")
+    return "\n".join(parts)
